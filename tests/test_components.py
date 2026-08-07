@@ -19,9 +19,13 @@ from src.preprocessing.cleaning import (
     resolve_entity_names,
 )
 from src.preprocessing.features import (
-    compute_ewma_features,
-    compute_starts_ratio,
-    compute_venue_multipliers,
+    compute_ewma_features_masked,
+    compute_rotation_risk,
+    compute_tactical_multipliers,
+    compute_positional_xpts,
+    drop_non_predictive,
+    generate_features,
+    load_tactical_cache,
 )
 from src.optimization.solver import solve_squad_selection, solve_transfer_plan, solve_problem
 
@@ -54,53 +58,130 @@ def test_impute_nan_by_position_fills_numeric():
     assert result["minutes"].isna().sum() == 0
 
 
-def test_compute_starts_ratio():
+def test_compute_ewma_features_masked():
     df = pd.DataFrame({
-        "starts": [10, 2, 5],
-        "appearances": [10, 5, 5],
+        "element_id": [1, 1, 1, 1, 2, 2, 2],
+        "gameweek": [1, 2, 3, 4, 1, 2, 3],
+        "expected_goals": [0.5, 0.8, 0.6, 0.4, 0.2, 0.4, 0.3],
+        "masked_for_ewma": [False, False, True, False, False, True, False],
     })
-    result = compute_starts_ratio(df)
-    assert result.loc[0, "starts_ratio"] == pytest.approx(1.0)
-    assert result.loc[1, "starts_ratio"] == pytest.approx(0.4)
-    assert result.loc[2, "starts_ratio"] == pytest.approx(1.0)
+    result = compute_ewma_features_masked(df, metrics=["expected_goals"])
+    assert "ewma_expected_goals_span3" in result.columns
+    assert result.loc[3, "ewma_expected_goals_span3"] > 0
+    assert pd.notna(result.loc[3, "ewma_expected_goals_span3"])
+    assert pd.notna(result.loc[2, "ewma_expected_goals_span3"])
 
 
-def test_compute_venue_multipliers():
+def test_compute_rotation_risk():
     df = pd.DataFrame({
-        "home_strength": [80.0, 70.0, 60.0],
-        "away_strength": [60.0, 80.0, 70.0],
+        "element_id": [1, 1, 1, 1, 1, 1],
+        "gameweek": [1, 2, 3, 4, 5, 6],
+        "starts": [1, 1, 0, 1, 1, 0],
+        "appearances": [1, 1, 1, 1, 1, 1],
     })
-    result = compute_venue_multipliers(df)
-    assert "venue_multiplier" in result.columns
-    assert result["venue_multiplier"].notna().all()
+    result = compute_rotation_risk(df)
+    assert "rotation_risk" in result.columns
+    assert result.loc[5, "rotation_risk"] == pytest.approx(4.0 / 6.0)
 
 
-def test_compute_ewma_features():
+def test_compute_rotation_risk_insufficient_appearances():
     df = pd.DataFrame({
-        "element_id": [1, 1, 1, 2, 2, 2],
-        "xG": [0.5, 0.8, 0.6, 0.2, 0.4, 0.3],
+        "element_id": [1, 1],
+        "gameweek": [1, 2],
+        "starts": [0, 0],
+        "appearances": [1, 1],
     })
-    result = compute_ewma_features(df, stats=["xG"])
-    assert "ewma_xG" in result.columns
-    assert result.loc[1, "ewma_xG"] > 0
-    assert result.loc[2, "ewma_xG"] > 0
-    assert result.loc[4, "ewma_xG"] > 0
-    assert result.loc[5, "ewma_xG"] > 0
+    result = compute_rotation_risk(df)
+    assert result.loc[1, "rotation_risk"] == 0.0
 
 
-def test_solve_squad_selection_basic():
+def test_compute_tactical_multipliers():
+    tactical = pd.DataFrame({
+        "season": ["2022-2023", "2022-2023"],
+        "team": ["Arsenal", "Liverpool"],
+        "PPDA": [8.5, 7.2],
+        "PPDA_allowed": [12.3, 10.9],
+        "defensive_third_field_tilt": [55.2, 60.5],
+        "final_third_tackles": [18.4, 22.1],
+        "xG": [68.5, 72.8],
+        "xGA": [42.1, 35.6],
+        "shots": [520, 550],
+        "shots_allowed": [380, 320],
+    })
     df = pd.DataFrame({
-        "element_id": list(range(1, 16)),
-        "position": ["GK"] * 2 + ["DEF"] * 5 + ["MID"] * 5 + ["FWD"] * 3,
-        "team": ["T1", "T2", "T3", "T4", "T5"] * 3,
-        "now_cost": [50.0] * 15,
-        "xPts": [5.0] * 15,
+        "element_id": [1, 2],
+        "team_normalized": ["Arsenal", "Liverpool"],
+        "position": ["DEF", "MID"],
     })
-    problem = solve_squad_selection(df, horizon_gws=1, budget=100.0)
-    solution = solve_problem(problem)
-    assert solution is not None
-    selected = [int(v.replace("p_", "")) for v in solution]
-    assert len(selected) == 15
+    result = compute_tactical_multipliers(df, tactical)
+    assert "tactical_multiplier" in result.columns
+    assert result.loc[0, "tactical_multiplier"] > 0
+    assert result.loc[1, "tactical_multiplier"] > 0
+
+
+def test_compute_positional_xpts():
+    df = pd.DataFrame({
+        "element_id": [1, 2, 3],
+        "position": ["GK", "MID", "FWD"],
+        "ewma_expected_goals_span5": [0.1, 0.3, 1.0],
+        "ewma_expected_assists_span5": [0.05, 0.2, 0.3],
+        "ewma_clearances_blocks_interceptions_span5": [12.0, 8.0, 5.0],
+        "ewma_clean_sheets_span5": [0.6, 0.4, 0.1],
+        "ewma_total_points_span5": [4.0, 5.0, 6.0],
+    })
+    result = compute_positional_xpts(df)
+    assert "target_xPts" in result.columns
+    assert result.loc[0, "target_xPts"] > 0
+    assert result.loc[2, "target_xPts"] > result.loc[0, "target_xPts"]
+
+
+def test_drop_non_predictive():
+    df = pd.DataFrame({
+        "element_id": [1, 2],
+        "name": ["A", "B"],
+        "value": [10, 20],
+    })
+    result = drop_non_predictive(df)
+    assert "element_id" in result.columns
+    assert "name" not in result.columns
+    assert "value" in result.columns
+
+
+def test_generate_features_outputs_parquet(tmp_path: Path):
+    df = pd.DataFrame({
+        "element_id": [1, 1, 2, 2],
+        "gameweek": [1, 2, 1, 2],
+        "position": ["MID", "MID", "FWD", "FWD"],
+        "team_normalized": ["Arsenal", "Arsenal", "Liverpool", "Liverpool"],
+        "expected_goals": [0.5, 0.8, 0.3, 0.6],
+        "expected_assists": [0.2, 0.3, 0.1, 0.2],
+        "clearances_blocks_interceptions": [5.0, 8.0, 2.0, 3.0],
+        "clean_sheets": [1, 0, 0, 0],
+        "total_points": [4.0, 6.0, 5.0, 7.0],
+        "minutes": [90, 90, 60, 90],
+        "starts": [1, 1, 1, 1],
+        "appearances": [1, 1, 1, 1],
+        "masked_for_ewma": [False, False, False, False],
+    })
+    tactical = pd.DataFrame({
+        "season": ["2022-2023", "2022-2023"],
+        "team": ["Arsenal", "Liverpool"],
+        "PPDA": [8.5, 7.2],
+        "PPDA_allowed": [12.3, 10.9],
+        "defensive_third_field_tilt": [55.2, 60.5],
+        "final_third_tackles": [18.4, 22.1],
+        "xG": [68.5, 72.8],
+        "xGA": [42.1, 35.6],
+        "shots": [520, 550],
+        "shots_allowed": [380, 320],
+    })
+    result = generate_features(df, tmp_path, tactical_df=tactical)
+    assert "target_xPts" in result.columns
+    assert "tactical_multiplier" in result.columns
+    assert "rotation_risk" in result.columns
+    assert "ewma_expected_goals_span3" in result.columns
+    out = tmp_path / "model_input.parquet"
+    assert out.exists()
 
 
 def test_build_entity_mapping(tmp_path: Path):

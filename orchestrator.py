@@ -15,7 +15,7 @@ import torch
 from config.pipeline import load_config
 from src.ingestion import run_ingestion
 from src.preprocessing.cleaning import clean_dataframe
-from src.preprocessing.features import build_feature_matrix
+from src.preprocessing.features import generate_features
 from src.models.tabular import train_tabular_model, predict_tabular
 from src.models.sequence import LSTMPredictor, train_sequence_model, predict_sequence
 from src.optimization.solver import solve_squad_selection, solve_transfer_plan, solve_problem
@@ -49,7 +49,19 @@ def step_preprocess(raw_dir: Path, processed_dir: Path) -> pd.DataFrame:
     if not records:
         raise ValueError("No element summary records found.")
     df = pd.DataFrame(records)
-    df = clean_dataframe(df)
+
+    bootstrap_path = raw_dir / "bootstrap_static.json"
+    entity_mapping = {}
+    if bootstrap_path.exists():
+        from src.preprocessing.cleaning import build_entity_mapping
+        try:
+            mapping_path = build_entity_mapping(bootstrap_path, processed_dir)
+            from src.preprocessing.cleaning import load_entity_mapping
+            entity_mapping = load_entity_mapping(processed_dir)
+        except Exception as exc:
+            logger.warning("Entity mapping build failed: {}", exc)
+
+    df = clean_dataframe(df, entity_mapping=entity_mapping)
     processed_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(processed_dir / "processed.parquet", index=False)
     logger.info("Processed data saved with shape {}", df.shape)
@@ -59,17 +71,16 @@ def step_preprocess(raw_dir: Path, processed_dir: Path) -> pd.DataFrame:
 def step_features(processed_dir: Path, features_dir: Path) -> pd.DataFrame:
     logger.info("Building features...")
     df = pd.read_parquet(processed_dir / "processed.parquet")
-    df = build_feature_matrix(df)
-    features_dir.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(features_dir / "features.parquet", index=False)
+    from src.preprocessing.features import generate_features
+    df = generate_features(df, features_dir)
     logger.info("Feature matrix saved with shape {}", df.shape)
     return df
 
 
 def step_train(features_dir: Path, models_dir: Path) -> None:
     logger.info("Training models...")
-    df = pd.read_parquet(features_dir / "features.parquet")
-    tabular_model, tabular_metrics = train_tabular_model(df, target="total_points")
+    df = pd.read_parquet(features_dir / "model_input.parquet")
+    tabular_model, tabular_metrics = train_tabular_model(df, target="target_xPts")
     models_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(tabular_model, models_dir / "tabular_model.joblib")
     logger.info("Tabular model saved. Metrics: {}", tabular_metrics)
@@ -81,11 +92,11 @@ def step_train(features_dir: Path, models_dir: Path) -> None:
 
 def step_predict(features_dir: Path, models_dir: Path) -> pd.DataFrame:
     logger.info("Generating predictions...")
-    df = pd.read_parquet(features_dir / "features.parquet")
+    df = pd.read_parquet(features_dir / "model_input.parquet")
     tabular_model = joblib.load(models_dir / "tabular_model.joblib")
     tabular_preds = predict_tabular(tabular_model, df)
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    feature_cols = [c for c in numeric_cols if c not in {"element_id", "gameweek", "total_points"}]
+    feature_cols = [c for c in numeric_cols if c not in {"element_id", "gameweek", "target_xPts"}]
     seq_model = LSTMPredictor(input_dim=len(feature_cols), hidden_dim=64, num_layers=2, dropout=0.3)
     seq_model.load_state_dict(torch.load(models_dir / "sequence_model.pt", map_location="cpu"))
     seq_preds = predict_sequence(seq_model, df, feature_cols=feature_cols)

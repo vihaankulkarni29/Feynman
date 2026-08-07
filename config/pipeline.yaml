@@ -44,10 +44,32 @@ preprocessing:
   min_matches_required: 5
 
 features:
-  ewma_halflife: 3.0
-  ewma_min_periods: 2
-  venue_adjustment_window: 5
-  momentum_window: 5
+  ewma:
+    spans:
+      - 3
+      - 5
+      - 10
+    min_periods: 2
+    export_isolated_csv: false
+    metrics:
+      - expected_goals
+      - expected_assists
+      - clearances_blocks_interceptions
+      - total_points
+      - minutes
+  rotation_risk:
+    window: 6
+    starts_col: starts
+    appearances_col: appearances
+    min_games: 3
+  tactical:
+    defensive_solidity_weight: 0.5
+    attacking_intensity_weight: 0.5
+    historical_cache: data/raw/tactical/tactical_metrics_historical.csv
+  venue:
+    adjustment_window: 5
+  momentum:
+    window: 5
   start_ratio_min_games: 3
 
 models:
