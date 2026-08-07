@@ -180,19 +180,29 @@ async def _run_async(raw_dir: Path) -> None:
     raw_dir = Path(raw_dir)
     all_frames: List[pd.DataFrame] = []
 
-    async with aiohttp.ClientSession() as session:
-        for season in seasons:
-            for table_id in tables:
-                df = await fetch_squad_tactical_table(season, table_id, session)
-                if not df.empty:
-                    all_frames.append(df)
+    cache_path = raw_dir / "tactical" / "tactical_metrics_historical.csv"
+    if cache_path.exists():
+        try:
+            cache_df = pd.read_csv(cache_path)
+            if not cache_df.empty:
+                all_frames.append(cache_df)
+                logger.info("Loaded {} rows from static tactical cache {}", len(cache_df), cache_path)
+        except Exception as exc:
+            logger.warning("Failed to load tactical cache: {}", exc)
+
+    current_seasons = seasons[-1:] if seasons else []
+    if current_seasons and tables:
+        async with aiohttp.ClientSession() as session:
+            for season in current_seasons:
+                for table_id in tables:
+                    df = await fetch_squad_tactical_table(season, table_id, session)
+                    if not df.empty:
+                        all_frames.append(df)
 
     if not all_frames:
         logger.warning(
-            "No FBref tactical data fetched. FBref is protected by Cloudflare and may block automated requests. "
-            "Options: (1) Run this script interactively with a real browser profile, "
-            "(2) Manually download tables from fbref.com and place in data/raw/historical/, "
-            "(3) Use a proxy service with valid Cloudflare clearance."
+            "No tactical data available. Historical cache missing and live fetch failed. "
+            "Populate data/raw/tactical/tactical_metrics_historical.csv to ensure deterministic offline execution."
         )
         df = pd.DataFrame()
     else:

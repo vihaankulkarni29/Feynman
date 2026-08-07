@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from src.preprocessing.cleaning import (
+    apply_status_flags,
+    build_entity_mapping,
+    clean_dataframe,
     fuzzy_match_players,
     impute_nan_by_position,
+    load_entity_mapping,
+    normalize_costs,
+    normalize_dates,
+    normalize_volume_metrics,
     resolve_entity_names,
 )
 from src.preprocessing.features import (
@@ -93,3 +101,110 @@ def test_solve_squad_selection_basic():
     assert solution is not None
     selected = [int(v.replace("p_", "")) for v in solution]
     assert len(selected) == 15
+
+
+def test_build_entity_mapping(tmp_path: Path):
+    bootstrap = {
+        "elements": [
+            {"id": 1, "first_name": "Mohamed", "second_name": "Salah", "web_name": "Salah", "team": 1, "element_type": 3, "now_cost": 130, "status": "a", "chance_of_playing_this_round": None, "chance_of_playing_next_round": None},
+            {"id": 2, "first_name": "Erling", "second_name": "Haaland", "web_name": "Haaland", "team": 2, "element_type": 4, "now_cost": 150, "status": "a", "chance_of_playing_this_round": 100, "chance_of_playing_next_round": 100},
+        ],
+        "teams": [{"id": 1, "name": "Liverpool"}, {"id": 2, "name": "Man City"}],
+        "element_types": [{"id": 1, "singular_name": "Goalkeeper"}, {"id": 2, "singular_name": "Defender"}, {"id": 3, "singular_name": "Midfielder"}, {"id": 4, "singular_name": "Forward"}],
+    }
+    bs_path = tmp_path / "bootstrap_static.json"
+    with bs_path.open("w", encoding="utf-8") as fh:
+        json.dump(bootstrap, fh)
+
+    out = build_entity_mapping(bs_path, tmp_path)
+    assert out.exists()
+    mapping = load_entity_mapping(tmp_path)
+    assert "1" in mapping
+    assert mapping["1"]["web_name"] == "Salah"
+    assert mapping["1"]["cost_normalized"] == pytest.approx(13.0)
+    assert mapping["2"]["cost_normalized"] == pytest.approx(15.0)
+
+
+def test_normalize_costs():
+    df = pd.DataFrame({"now_cost": [130, 150, None, "abc"]})
+    result = normalize_costs(df)
+    assert result.loc[0, "cost_normalized"] == pytest.approx(13.0)
+    assert result.loc[1, "cost_normalized"] == pytest.approx(15.0)
+    assert pd.isna(result.loc[2, "cost_normalized"])
+    assert pd.isna(result.loc[3, "cost_normalized"])
+
+
+def test_normalize_dates():
+    df = pd.DataFrame({"kickoff_time": ["2025-08-15T12:30:00Z", None, "invalid"]})
+    result = normalize_dates(df)
+    assert isinstance(result.loc[0, "kickoff_time_utc"], pd.Timestamp)
+    assert str(result.loc[0, "kickoff_time_utc"].tz) in ("UTC", "datetime.timezone.utc")
+    assert pd.isna(result.loc[1, "kickoff_time_utc"])
+    assert pd.isna(result.loc[2, "kickoff_time_utc"])
+
+
+def test_apply_status_flags():
+    entity_mapping = {
+        "1": {"chance_of_playing_this_round": 0, "chance_of_playing_next_round": None},
+        "2": {"chance_of_playing_this_round": 100, "chance_of_playing_next_round": 100},
+        "3": {"chance_of_playing_this_round": None, "chance_of_playing_next_round": None},
+    }
+    df = pd.DataFrame({
+        "element_id": [1, 2, 3, 3],
+        "minutes": [0, 0, 0, 90],
+        "chance_of_playing_this_round": [0, 100, None, None],
+        "chance_of_playing_next_round": [None, 100, None, None],
+    })
+    result = apply_status_flags(df, entity_mapping)
+    assert result.loc[0, "player_status"] == "injured"
+    assert result.loc[1, "player_status"] == "benched"
+    assert result.loc[2, "player_status"] == "dnp"
+    assert result.loc[3, "player_status"] == "active"
+    assert bool(result.loc[0, "is_injured_dnp"]) is True
+    assert bool(result.loc[1, "is_benched"]) is True
+    assert bool(result.loc[3, "masked_for_ewma"]) is False
+
+
+def test_normalize_volume_metrics():
+    df = pd.DataFrame({
+        "expected_goals": [0.5, 0.3, 0.2],
+        "expected_assists": [0.2, 0.1, 0.0],
+        "shots": [3, 2, 1],
+        "is_benched": [False, True, False],
+    })
+    result = normalize_volume_metrics(df)
+    assert result.loc[0, "expected_goals"] == pytest.approx(0.5)
+    assert result.loc[1, "expected_goals"] == 0.0
+    assert result.loc[1, "shots"] == 0.0
+    assert result.loc[2, "expected_goals"] == pytest.approx(0.2)
+
+
+def test_clean_dataframe_integration():
+    df = pd.DataFrame({
+        "name": ["Player A"],
+        "team": ["Man City"],
+        "position": ["MID"],
+        "now_cost": [130],
+        "kickoff_time": ["2025-08-15T12:30:00Z"],
+        "minutes": [0],
+        "expected_goals": [0.5],
+        "expected_assists": [0.2],
+        "element_id": [1],
+    })
+    entity_mapping = {
+        "1": {
+            "web_name": "Player A",
+            "team_name": "Manchester City",
+            "position": "Midfielder",
+            "cost_normalized": 13.0,
+            "chance_of_playing_this_round": 100,
+            "chance_of_playing_next_round": 100,
+        }
+    }
+    result = clean_dataframe(df, entity_mapping=entity_mapping)
+    assert "team_normalized" in result.columns
+    assert result.loc[0, "team_normalized"] == "Manchester City"
+    assert result.loc[0, "cost_normalized"] == pytest.approx(13.0)
+    assert str(result.loc[0, "kickoff_time_utc"].tz) in ("UTC", "datetime.timezone.utc")
+    assert bool(result.loc[0, "is_benched"]) is True
+    assert result.loc[0, "expected_goals"] == 0.0
