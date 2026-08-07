@@ -1,0 +1,16 @@
+requests==2.31.0
+beautifulsoup4==4.12.3
+selenium==4.18.1
+pandas==2.2.2
+numpy>=2.0.0
+scikit-learn>=1.5.0
+lightgbm>=4.3.0
+xgboost>=2.0.0
+torch>=2.5.0
+pulp==2.9.0
+pyyaml==6.0.1
+tqdm==4.66.2
+loguru==0.7.2
+matplotlib==3.8.4
+thefuzz==0.20.0
+# python-Levenshtein is optional; thefuzz falls back to rapidfuzz on Windows/Python 3.13

@@ -1,0 +1,93 @@
+fpl_api:
+  base_url: "https://fantasy.premierleague.com/api/"
+  bootstrap_static: "bootstrap-static/"
+  element_summary: "element-summary/{element_id}/"
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  timeout_seconds: 30
+
+fbref:
+  base_url: "https://fbref.com"
+  seasons:
+    - "2024-2025"
+  leagues:
+    - "Premier League"
+  match_logs_selector: "#stats_standard_9"
+  squad_stats_selector: "#stats_squads_standard_for"
+  headless: true
+
+preprocessing:
+  fuzzy_match_threshold: 85
+  position_median_fill: true
+  forward_fill_gap_days: 7
+  min_matches_required: 5
+
+features:
+  ewma_halflife: 3.0
+  ewma_min_periods: 2
+  venue_adjustment_window: 5
+  momentum_window: 5
+  start_ratio_min_games: 3
+
+models:
+  tabular:
+    model_type: "xgboost"
+    objective: "reg:squarederror"
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 6
+    subsample: 0.8
+    colsample_bytree: 0.8
+    early_stopping_rounds: 50
+    validation_fraction: 0.1
+    test_fraction: 0.15
+    random_state: 42
+
+  sequence:
+    model_type: "lstm"
+    input_window: 5
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.3
+    learning_rate: 0.001
+    batch_size: 32
+    epochs: 50
+    patience: 10
+    device: "cpu"
+
+  ensemble:
+    strategy: "weighted"
+    tabular_weight: 0.7
+    sequence_weight: 0.3
+
+optimization:
+  solver: "pulp"
+  horizon_gws: 5
+  max_transfers_per_gw: 1
+  transfer_penalty: 4.0
+  budget: 100.0
+  squad_size: 15
+  position_constraints:
+    GK: 2
+    DEF: 5
+    MID: 5
+    FWD: 3
+  max_players_per_team: 3
+  bench_weights:
+    GK: 0.0
+    DEF: 0.0
+    MID: 0.1
+    FWD: 0.1
+
+gameweeks:
+  current_gw: 1
+  start_gw: 1
+  end_gw: 38
+  fixture_difficulty_lookback: 4
+
+paths:
+  raw_dir: "data/raw/"
+  processed_dir: "data/processed/"
+  features_dir: "data/features/"
+  models_dir: "models/"
+  logs_dir: "logs/"
