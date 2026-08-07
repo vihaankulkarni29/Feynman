@@ -41,9 +41,16 @@ class Fixture(BaseModel):
 
 
 class BootstrapStatic(BaseModel):
-    elements: List[Dict[str, Any]]
+    chips: List[Dict[str, Any]] = Field(default_factory=list)
+    events: List[Dict[str, Any]] = Field(default_factory=list)
+    game_settings: Dict[str, Any] = Field(default_factory=dict)
+    game_config: Dict[str, Any] = Field(default_factory=dict)
+    phases: List[Dict[str, Any]] = Field(default_factory=list)
     teams: List[Dict[str, Any]]
-    gameweeks: List[Dict[str, Any]]
+    total_players: int = 0
+    element_stats: List[Dict[str, Any]] = Field(default_factory=list)
+    element_types: List[Dict[str, Any]] = Field(default_factory=list)
+    elements: List[Dict[str, Any]]
 
 
 class AsyncFPLClient:
