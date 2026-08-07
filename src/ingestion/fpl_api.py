@@ -114,6 +114,10 @@ class AsyncFPLClient:
         immutable_write_json(payload, raw_dir, "fixtures")
         return fixtures
 
+    async def build_players_index(self, session: aiohttp.ClientSession, raw_dir: Path, bootstrap: BootstrapStatic) -> Path:
+        from src.ingestion.players_index import extract_players_index
+        return extract_players_index(raw_dir)
+
 
 async def _run_async(raw_dir: Path) -> None:
     config = load_config()["fpl_api"]
@@ -125,6 +129,7 @@ async def _run_async(raw_dir: Path) -> None:
         bootstrap = await client.fetch_bootstrap_static(session, raw_dir)
         await client.fetch_all_element_summaries(session, raw_dir, bootstrap)
         await client.fetch_fixtures(session, raw_dir)
+        await client.build_players_index(session, raw_dir, bootstrap)
 
 
 def run_fpl_ingestion(raw_dir: Path) -> None:
