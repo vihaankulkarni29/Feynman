@@ -21,11 +21,21 @@ vaastav:
     - "players_raw.csv"
 
 tactical:
-  understat_base_url: "https://understat.com"
-  fotmob_base_url: "https://www.fotmob.com"
   raw_filename: "tactical_metrics.csv"
   raw_subdir: ""
+  seasons:
+    - "2024-2025"
+    - "2023-2024"
+    - "2022-2023"
+  fbref_tables:
+    - "stats_squads_defense_for"
+    - "stats_squads_possession_for"
+    - "stats_squads_misc_for"
   request_delay_seconds: 1.0
+  selenium:
+    headless: true
+    wait_time_seconds: 15
+  note: "Current season tactical metrics unavailable; OPTA data feed discontinued. Historical FBref tables used instead."
 
 preprocessing:
   fuzzy_match_threshold: 85
