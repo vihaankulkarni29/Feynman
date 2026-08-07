@@ -2,19 +2,30 @@ fpl_api:
   base_url: "https://fantasy.premierleague.com/api/"
   bootstrap_static: "bootstrap-static/"
   element_summary: "element-summary/{element_id}/"
+  fixtures: "fixtures/"
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
   timeout_seconds: 30
+  max_concurrency: 30
 
-fbref:
-  base_url: "https://fbref.com"
+vaastav:
+  repo_owner: "vaastav"
+  repo_name: "FPL"
   seasons:
     - "2024-2025"
-  leagues:
-    - "Premier League"
-  match_logs_selector: "#stats_standard_9"
-  squad_stats_selector: "#stats_squads_standard_for"
-  headless: true
+    - "2023-2024"
+    - "2022-2023"
+  raw_subdir: "historical"
+  files:
+    - "merged_gw.csv"
+    - "players_raw.csv"
+
+tactical:
+  understat_base_url: "https://understat.com"
+  fotmob_base_url: "https://www.fotmob.com"
+  raw_filename: "tactical_metrics.csv"
+  raw_subdir: ""
+  request_delay_seconds: 1.0
 
 preprocessing:
   fuzzy_match_threshold: 85

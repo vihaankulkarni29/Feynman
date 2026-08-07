@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 from typing import Dict, Optional
@@ -12,8 +13,7 @@ import pandas as pd
 import torch
 
 from config.pipeline import load_config
-from src.ingestion.fpl_api import run_ingestion
-from src.ingestion.fbref_sync import sync_fbref
+from src.ingestion import run_ingestion
 from src.preprocessing.cleaning import clean_dataframe
 from src.preprocessing.features import build_feature_matrix
 from src.models.tabular import train_tabular_model, predict_tabular
@@ -23,15 +23,14 @@ from src.optimization.simulator import monte_carlo_squad
 
 
 def _raw_data_exists(raw_dir: Path) -> bool:
-    files = list(raw_dir.glob("bootstrap_static.json")) + list(raw_dir.glob("element_summary_*.json"))
+    files = list(raw_dir.glob("bootstrap_static.json")) + list(raw_dir.glob("player_*_summary.json"))
     return len(files) > 0
 
 
 def step_ingest(raw_dir: Path) -> None:
     if not _raw_data_exists(raw_dir):
         logger.info("Running ingestion...")
-        run_ingestion(raw_dir)
-        sync_fbref(raw_dir)
+        asyncio.run(run_ingestion(raw_dir))
     else:
         logger.info("Raw data already present. Skipping ingestion.")
 
@@ -39,13 +38,13 @@ def step_ingest(raw_dir: Path) -> None:
 def step_preprocess(raw_dir: Path, processed_dir: Path) -> pd.DataFrame:
     logger.info("Preprocessing data...")
     records = []
-    for path in raw_dir.glob("element_summary_*.json"):
+    for path in raw_dir.glob("player_*_summary.json"):
         import json
         with path.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
         history = data.get("history", [])
         for row in history:
-            row["element_id"] = path.stem.replace("element_summary_", "")
+            row["element_id"] = path.stem.replace("player_", "").replace("_summary", "")
             records.append(row)
     if not records:
         raise ValueError("No element summary records found.")
