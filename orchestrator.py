@@ -17,7 +17,8 @@ from src.ingestion import run_ingestion
 from src.preprocessing.cleaning import clean_dataframe
 from src.preprocessing.features import generate_features
 from src.models.tabular import train_tabular_model, predict_tabular
-from src.models.sequence import LSTMPredictor, train_sequence_model, predict_sequence
+from src.models.sequence import FPLLSTM, train_sequence_model, predict_sequence
+from src.models.train import run_training
 from src.optimization.solver import solve_squad_selection, solve_transfer_plan, solve_problem
 from src.optimization.simulator import monte_carlo_squad
 
@@ -79,26 +80,27 @@ def step_features(processed_dir: Path, features_dir: Path) -> pd.DataFrame:
 
 def step_train(features_dir: Path, models_dir: Path) -> None:
     logger.info("Training models...")
-    df = pd.read_parquet(features_dir / "model_input.parquet")
-    tabular_model, tabular_metrics = train_tabular_model(df, target="target_xPts")
-    models_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(tabular_model, models_dir / "tabular_model.joblib")
-    logger.info("Tabular model saved. Metrics: {}", tabular_metrics)
-
-    seq_model, seq_metrics = train_sequence_model(df)
-    torch.save(seq_model.state_dict(), models_dir / "sequence_model.pt")
-    logger.info("Sequence model saved. Metrics: {}", seq_metrics)
+    run_training(features_dir, models_dir)
 
 
 def step_predict(features_dir: Path, models_dir: Path) -> pd.DataFrame:
     logger.info("Generating predictions...")
     df = pd.read_parquet(features_dir / "model_input.parquet")
-    tabular_model = joblib.load(models_dir / "tabular_model.joblib")
+    models_dir = Path(models_dir)
+
+    tabular_path = models_dir / "xgboost_model.json"
+    if tabular_path.exists():
+        import xgboost as xgb
+        tabular_model = xgb.XGBRegressor()
+        tabular_model.load_model(str(tabular_path))
+    else:
+        tabular_model = joblib.load(models_dir / "tabular_model.joblib")
     tabular_preds = predict_tabular(tabular_model, df)
+
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     feature_cols = [c for c in numeric_cols if c not in {"element_id", "gameweek", "target_xPts"}]
-    seq_model = LSTMPredictor(input_dim=len(feature_cols), hidden_dim=64, num_layers=2, dropout=0.3)
-    seq_model.load_state_dict(torch.load(models_dir / "sequence_model.pt", map_location="cpu"))
+    seq_model = FPLLSTM(input_dim=len(feature_cols), hidden_dim=64, num_layers=2, dropout=0.2)
+    seq_model.load_state_dict(torch.load(models_dir / "lstm_weights.pt", map_location="cpu"))
     seq_preds = predict_sequence(seq_model, df, feature_cols=feature_cols)
 
     df = df.merge(tabular_preds, left_index=True, right_index=True, how="left")

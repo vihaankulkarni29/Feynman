@@ -13,62 +13,166 @@ from loguru import logger
 from config.pipeline import load_config
 
 
-class LSTMPredictor(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> None:
+class FPLSequenceDataset(torch.utils.data.Dataset):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        feature_cols: List[str],
+        target_col: str = "target_xPts",
+        seq_len: int = 5,
+        group_by: str = "element_id",
+        time_col: str = "gameweek",
+    ) -> None:
+        self.feature_cols = feature_cols
+        self.target_col = target_col
+        self.seq_len = seq_len
+        self.group_by = group_by
+        self.time_col = time_col
+
+        sequences: List[np.ndarray] = []
+        targets: List[float] = []
+        masks: List[np.ndarray] = []
+        lengths: List[int] = []
+
+        for _, group in df.groupby(group_by):
+            group = group.sort_values(time_col).reset_index(drop=True)
+            values = group[feature_cols].values.astype(np.float32)
+            target_vals = group[target_col].values.astype(np.float32)
+
+            if len(group) <= seq_len:
+                padded = np.zeros((seq_len, len(feature_cols)), dtype=np.float32)
+                mask = np.zeros(seq_len, dtype=np.float32)
+                if len(group) > 0:
+                    padded[-len(group):] = values
+                    mask[-len(group):] = 1.0
+                sequences.append(padded)
+                targets.append(float(target_vals[-1]) if len(target_vals) > 0 else 0.0)
+                masks.append(mask)
+                lengths.append(min(len(group), seq_len))
+                continue
+
+            for i in range(seq_len, len(group)):
+                seq = values[i - seq_len : i]
+                target = target_vals[i]
+                sequences.append(seq)
+                targets.append(float(target))
+                masks.append(np.ones(seq_len, dtype=np.float32))
+                lengths.append(seq_len)
+
+        if not sequences:
+            raise ValueError("No sequences built; check data size and seq_len.")
+
+        self.sequences = np.array(sequences, dtype=np.float32)
+        self.targets = np.array(targets, dtype=np.float32)
+        self.masks = np.array(masks, dtype=np.float32)
+        self.lengths = np.array(lengths, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.tensor(self.sequences[idx], dtype=torch.float32),
+            torch.tensor(self.targets[idx], dtype=torch.float32),
+            torch.tensor(self.masks[idx], dtype=torch.float32),
+            torch.tensor(self.lengths[idx], dtype=torch.long),
+        )
+
+
+class FPLLSTM(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+        dropout: float = 0.2,
+    ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.lstm = nn.LSTM(
-            input_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=dropout
+            input_dim,
+            hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
         )
         self.fc = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         out, _ = self.lstm(x)
-        out = self.fc(out[:, -1, :])
-        return out.squeeze(-1)
+        last = out[:, -1, :]
+        return self.fc(last).squeeze(-1)
 
 
-def _build_sequences(df: pd.DataFrame, feature_cols: List[str], window: int) -> Tuple[np.ndarray, np.ndarray]:
+def _build_sequences(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    target_col: str,
+    seq_len: int,
+    group_by: str,
+    time_col: str,
+) -> Tuple[np.ndarray, np.ndarray]:
     sequences = []
     targets = []
-    for _, group in df.groupby("element_id"):
-        group = group.sort_values("gameweek").reset_index(drop=True)
-        if len(group) <= window:
+    for _, group in df.groupby(group_by):
+        group = group.sort_values(time_col).reset_index(drop=True)
+        values = group[feature_cols].values.astype(np.float32)
+        target_vals = group[target_col].values.astype(np.float32)
+        if len(group) <= seq_len:
+            padded = np.zeros((seq_len, len(feature_cols)), dtype=np.float32)
+            if len(group) > 0:
+                padded[-len(group):] = values
+            sequences.append(padded)
+            targets.append(float(target_vals[-1]) if len(target_vals) > 0 else 0.0)
             continue
-        values = group[feature_cols].values
-        target_vals = group["total_points"].values
-        for i in range(window, len(group)):
-            sequences.append(values[i - window : i])
-            targets.append(target_vals[i])
+        for i in range(seq_len, len(group)):
+            sequences.append(values[i - seq_len : i])
+            targets.append(float(target_vals[i]))
     if not sequences:
-        raise ValueError("No sequences built; check window and data size.")
+        raise ValueError("No sequences built; check data size and seq_len.")
     return np.array(sequences, dtype=np.float32), np.array(targets, dtype=np.float32)
 
 
-def train_sequence_model(df: pd.DataFrame, feature_cols: Optional[List[str]] = None) -> Tuple[LSTMPredictor, Dict[str, float]]:
+def train_sequence_model(
+    df: pd.DataFrame,
+    feature_cols: Optional[List[str]] = None,
+    target_col: str = "target_xPts",
+    time_col: str = "gameweek",
+    group_by: str = "element_id",
+) -> Tuple[FPLLSTM, Dict[str, float]]:
     config = load_config()["models"]["sequence"]
-    window = config.get("input_window", 5)
+    seq_len = config.get("input_window", 5)
     hidden_dim = config.get("hidden_dim", 64)
     num_layers = config.get("num_layers", 2)
-    dropout = config.get("dropout", 0.3)
+    dropout = config.get("dropout", 0.2)
     learning_rate = config.get("learning_rate", 0.001)
     batch_size = config.get("batch_size", 32)
     epochs = config.get("epochs", 50)
-    patience = config.get("patience", 10)
+    patience = config.get("patience", 5)
     device = torch.device(config.get("device", "cpu"))
 
     if feature_cols is None:
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        feature_cols = [c for c in numeric_cols if c not in {"element_id", "gameweek", "total_points"}]
+        feature_cols = [c for c in numeric_cols if c not in {target_col, group_by, time_col}]
 
-    X, y = _build_sequences(df, feature_cols=feature_cols, window=window)
-    X = torch.tensor(X, device=device)
-    y = torch.tensor(y, device=device)
+    X, y = _build_sequences(df, feature_cols, target_col, seq_len, group_by, time_col)
+    X = torch.tensor(X, dtype=torch.float32)
+    y = torch.tensor(y, dtype=torch.float32)
 
-    model = LSTMPredictor(input_dim=X.shape[2], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout).to(device)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    dataset = torch.utils.data.TensorDataset(X, y)
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    model = FPLLSTM(input_dim=X.shape[2], hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout).to(device)
+    criterion = nn.HuberLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 
     best_loss = float("inf")
     best_state = None
@@ -76,23 +180,25 @@ def train_sequence_model(df: pd.DataFrame, feature_cols: Optional[List[str]] = N
 
     for epoch in range(epochs):
         model.train()
-        permutation = torch.randperm(X.size(0))
         train_loss = 0.0
-        for i in range(0, X.size(0), batch_size):
-            idx = permutation[i : i + batch_size]
-            batch_x, batch_y = X[idx], y[idx]
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             optimizer.zero_grad()
             preds = model(batch_x)
             loss = criterion(preds, batch_y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * batch_x.size(0)
-        train_loss /= X.size(0)
+        train_loss /= len(train_loader.dataset)
 
         model.eval()
+        val_loss = 0.0
         with torch.no_grad():
-            val_preds = model(X)
-            val_loss = float(criterion(val_preds, y).item())
+            for batch_x, batch_y in val_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+                preds = model(batch_x)
+                val_loss += criterion(preds, batch_y).item() * batch_x.size(0)
+        val_loss /= len(val_loader.dataset)
 
         if val_loss < best_loss:
             best_loss = val_loss
@@ -110,29 +216,36 @@ def train_sequence_model(df: pd.DataFrame, feature_cols: Optional[List[str]] = N
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    metrics = {"val_mse": best_loss}
-    logger.info("Sequence model trained. Best val MSE: {:.4f}", best_loss)
+    metrics = {"val_huber": best_loss}
+    logger.info("Sequence model trained. Best val Huber: {:.4f}", best_loss)
     return model, metrics
 
 
-def predict_sequence(model: LSTMPredictor, df: pd.DataFrame, feature_cols: Optional[List[str]] = None) -> pd.Series:
+def predict_sequence(
+    model: FPLLSTM,
+    df: pd.DataFrame,
+    feature_cols: Optional[List[str]] = None,
+    target_col: str = "target_xPts",
+    time_col: str = "gameweek",
+    group_by: str = "element_id",
+) -> pd.Series:
     config = load_config()["models"]["sequence"]
-    window = config.get("input_window", 5)
+    seq_len = config.get("input_window", 5)
     device = torch.device(config.get("device", "cpu"))
 
     if feature_cols is None:
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
-        feature_cols = [c for c in numeric_cols if c not in {"element_id", "gameweek", "total_points"}]
+        feature_cols = [c for c in numeric_cols if c not in {target_col, group_by, time_col}]
 
+    model.eval()
     preds = []
     indices = []
-    model.eval()
     with torch.no_grad():
-        for element_id, group in df.groupby("element_id"):
-            group = group.sort_values("gameweek").reset_index(drop=True)
-            if len(group) <= window:
+        for element_id, group in df.groupby(group_by):
+            group = group.sort_values(time_col).reset_index(drop=True)
+            if len(group) < seq_len:
                 continue
-            seq = group[feature_cols].values[-window:]
+            seq = group[feature_cols].values[-seq_len:]
             x = torch.tensor(seq, dtype=torch.float32, device=device).unsqueeze(0)
             pred = model(x).item()
             preds.append(pred)

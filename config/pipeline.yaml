@@ -91,17 +91,23 @@ models:
     input_window: 5
     hidden_dim: 64
     num_layers: 2
-    dropout: 0.3
+    dropout: 0.2
     learning_rate: 0.001
     batch_size: 32
     epochs: 50
-    patience: 10
+    patience: 5
     device: "cpu"
 
   ensemble:
     strategy: "weighted"
     tabular_weight: 0.7
     sequence_weight: 0.3
+    meta_learner: "ridge"
+    chronological:
+      train_seasons:
+        - "2023-2024"
+        - "2022-2023"
+      validate_first_n_gws: 19
 
 optimization:
   solver: "pulp"
